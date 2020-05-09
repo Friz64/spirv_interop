@@ -1,0 +1,9 @@
+[package]
+name = "spirv_interop"
+version = "0.1.0"
+authors = ["Friz64 <friz64mc@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+spirv_interop_macros = { path = "../spirv_interop_macros" }
+mint = "0.5"

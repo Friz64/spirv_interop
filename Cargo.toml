@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "spirv_interop",
+    "spirv_interop_macros",
+    "spirv_interop_examples",
+]
+

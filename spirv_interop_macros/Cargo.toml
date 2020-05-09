@@ -1,0 +1,15 @@
+[package]
+name = "spirv_interop_macros"
+version = "0.1.0"
+authors = ["Friz64 <friz64mc@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+syn = "1"
+quote = "1"
+proc-macro2 = "1"
+rspirv = "0.6.0"
+spirv_headers = "1.4.2"
+
+[lib]
+proc-macro = true
