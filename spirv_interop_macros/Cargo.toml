@@ -2,6 +2,13 @@
 name = "spirv_interop_macros"
 version = "0.1.0"
 authors = ["Friz64 <friz64mc@gmail.com>"]
+license = "Zlib"
+description = "Pure Rust SPIR-V reflection and generation of structs"
+documentation = "https://docs.rs/spirv_interop"
+repository = "https://gitlab.com/Friz64/spirv_interop"
+readme = "../README.md"
+keywords = ["gamedev", "graphics", "spirv", "reflect"]
+categories = ["game-development", "graphics", "rendering::data-formats"]
 edition = "2018"
 
 [dependencies]
