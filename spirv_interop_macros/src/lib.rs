@@ -106,8 +106,12 @@ fn int_convert(type_inst: &Instruction) -> Option<TokenStream> {
             Some(match (bits, signed) {
                 (64, 0) => quote! { u64 },
                 (32, 0) => quote! { u32 },
+                (16, 0) => quote! { u16 },
+                (8, 0) => quote! { u8 },
                 (64, 1) => quote! { i64 },
                 (32, 1) => quote! { i32 },
+                (16, 1) => quote! { i16 },
+                (8, 1) => quote! { i8 },
                 _ => panic!(),
             })
         }
@@ -126,22 +130,35 @@ fn float_convert(type_inst: &Instruction) -> Option<TokenStream> {
     }
 }
 
-fn vector_info(module: &Module, type_inst: &Instruction) -> Option<(TokenStream, Word)> {
+fn vector_info(
+    module: &Module,
+    type_inst: &Instruction,
+    decorations: &[(Decoration, Option<Operand>)],
+) -> Option<(TokenStream, Word)> {
     match (type_inst.class.opcode, type_inst.operands.as_slice()) {
-        (Op::TypeVector, [Operand::IdRef(float_ref), Operand::LiteralInt32(size)]) => {
-            let float_ty = float_convert(inst(&module.types_global_values, *float_ref)).unwrap();
-            Some((float_ty, *size))
+        (Op::TypeVector, [Operand::IdRef(inner_ref), Operand::LiteralInt32(size)]) => {
+            let inner_ty = type_convert(module, *inner_ref, decorations);
+            Some((inner_ty, *size))
         }
         _ => None,
     }
 }
 
-fn matrix_info(module: &Module, type_inst: &Instruction) -> Option<(TokenStream, Word, Word)> {
+fn matrix_info(
+    module: &Module,
+    type_inst: &Instruction,
+    decorations: &[(Decoration, Option<Operand>)],
+) -> Option<(TokenStream, Word, Word)> {
     match (type_inst.class.opcode, type_inst.operands.as_slice()) {
-        (Op::TypeMatrix, [Operand::IdRef(vector_ref), Operand::LiteralInt32(major_size)]) => {
-            let (float_ty, minor_size) =
-                vector_info(module, inst(&module.types_global_values, *vector_ref)).unwrap();
-            Some((float_ty, *major_size, minor_size))
+        (Op::TypeMatrix, [Operand::IdRef(inner_ref), Operand::LiteralInt32(major_size)]) => {
+            let (inner_ty, minor_size) = vector_info(
+                module,
+                inst(&module.types_global_values, *inner_ref),
+                decorations,
+            )
+            .unwrap();
+
+            Some((inner_ty, *major_size, minor_size))
         }
         _ => None,
     }
@@ -179,7 +196,7 @@ fn type_convert(
         }
         Op::TypeInt => int_convert(type_inst).unwrap(),
         Op::TypeFloat => float_convert(type_inst).unwrap(),
-        Op::TypeVector => match vector_info(module, type_inst).unwrap() {
+        Op::TypeVector => match vector_info(module, type_inst, decorations).unwrap() {
             (float_ty, 2) => quote! { ::spirv_interop::mint::Vector2<#float_ty> },
             (float_ty, 3) => quote! { ::spirv_interop::mint::Vector3<#float_ty> },
             (float_ty, 4) => quote! { ::spirv_interop::mint::Vector4<#float_ty> },
@@ -190,7 +207,7 @@ fn type_convert(
                 .iter()
                 .any(|(dec, _)| dec == &Decoration::RowMajor);
 
-            match matrix_info(module, type_inst).unwrap() {
+            match matrix_info(module, type_inst, decorations).unwrap() {
                 (float_ty, 2, 2) => {
                     if row_major {
                         quote! { ::spirv_interop::mint::RowMatrix2<#float_ty> }
