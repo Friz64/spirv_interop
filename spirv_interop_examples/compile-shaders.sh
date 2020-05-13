@@ -6,4 +6,4 @@ function compile {
     glslc -g -O $1 -o $1.spv
 }
 
-compile $base/src/bin/reflect.vert
+compile $base/src/bin/reflect_test.vert

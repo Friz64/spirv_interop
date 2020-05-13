@@ -1,7 +1,7 @@
 use proc_macro2::{Literal, TokenStream};
 use quote::quote;
 use rspirv::dr::{Instruction, Module, Operand};
-use spirv_headers::{Decoration, Op, Word};
+use spirv_headers::{Decoration, Op, StorageClass, Word};
 use std::{env, fs, path::Path};
 use syn::{
     parse::{self, Parse, ParseStream},
@@ -30,6 +30,13 @@ impl Parse for Reflect {
     }
 }
 
+fn array(name: TokenStream, ty: TokenStream, values: &[TokenStream]) -> TokenStream {
+    let len = Literal::usize_unsuffixed(values.len());
+    quote! {
+        #name: [#ty; #len] = [#(#values),*]
+    }
+}
+
 fn inst(insts: &[Instruction], id: Word) -> &Instruction {
     insts
         .iter()
@@ -37,7 +44,7 @@ fn inst(insts: &[Instruction], id: Word) -> &Instruction {
         .expect("failed to find instruction")
 }
 
-fn name(module: &Module, id: Word) -> &String {
+fn name(module: &Module, id: Word) -> Option<&String> {
     module
         .debugs
         .iter()
@@ -49,7 +56,6 @@ fn name(module: &Module, id: Word) -> &String {
             }
             _ => None,
         })
-        .expect("failed to find name")
 }
 
 fn member_name(module: &Module, id: Word, member_idx: Word) -> &String {
@@ -71,6 +77,25 @@ fn member_name(module: &Module, id: Word, member_idx: Word) -> &String {
             }
         })
         .expect("failed to find member name")
+}
+
+fn decorations(module: &Module, id: Word) -> Vec<(Decoration, Option<Operand>)> {
+    module
+        .annotations
+        .iter()
+        .filter_map(|inst| {
+            if let Op::Decorate = inst.class.opcode {
+                match (&inst.operands[0], &inst.operands[1]) {
+                    (&Operand::IdRef(id_ref), &Operand::Decoration(decoration)) if id_ref == id => {
+                        Some((decoration, inst.operands.get(2).cloned()))
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn member_decorations(
@@ -179,6 +204,10 @@ fn type_convert(
     let type_inst = inst(&module.types_global_values, type_id);
 
     match type_inst.class.opcode {
+        Op::TypeStruct => {
+            let name: Ident = syn::parse_str(&name(module, type_id).unwrap()).unwrap();
+            quote! { #name }
+        }
         Op::TypeArray => {
             let (inner_ty_ref, size_ref) = match type_inst.operands.as_slice() {
                 [Operand::IdRef(inner_ty_ref), Operand::IdRef(size_ref)] => {
@@ -278,13 +307,6 @@ fn type_convert(
     }
 }
 
-fn array(name: TokenStream, ty: TokenStream, values: &[TokenStream]) -> TokenStream {
-    let len = Literal::usize_unsuffixed(values.len());
-    quote! {
-        #name: [#ty; #len] = [#(#values),*]
-    }
-}
-
 fn entry_points(module: &Module) -> TokenStream {
     let entry_points: Vec<_> = module
         .entry_points
@@ -306,15 +328,16 @@ fn structs(module: &Module) -> TokenStream {
     'outer: for instruction in module.types_global_values.iter() {
         if let Op::TypeStruct = instruction.class.opcode {
             let id = instruction.result_id.unwrap();
-            let name: Ident = syn::parse_str(name(module, id)).unwrap();
+            let name: Ident =
+                syn::parse_str(name(module, id).unwrap()).expect("Invalid struct name");
 
             let mut fields = vec![];
             for (i, operand) in instruction.operands.iter().enumerate() {
                 match operand {
                     &Operand::IdRef(type_id) => {
                         let member_idx = i as Word;
-                        let name: Ident =
-                            syn::parse_str(member_name(module, id, member_idx)).unwrap();
+                        let name: Ident = syn::parse_str(member_name(module, id, member_idx))
+                            .expect("Invalid field name");
                         let decorations = member_decorations(module, id, member_idx);
 
                         // skip over structs with built in fields
@@ -348,6 +371,114 @@ fn structs(module: &Module) -> TokenStream {
     structs.into_iter().collect()
 }
 
+fn construct_uniform_var(name: &str, set: u32, binding: u32) -> TokenStream {
+    let set = Literal::u32_unsuffixed(set);
+    let binding = Literal::u32_unsuffixed(binding);
+    quote! { ::spirv_interop::UniformVariable { name: #name, set: #set, binding: #binding } }
+}
+
+fn construct_input_var(name: &str, location: u32) -> TokenStream {
+    let location = Literal::u32_unsuffixed(location);
+    quote! { ::spirv_interop::InputVariable { name: #name, location: #location } }
+}
+
+fn construct_output_var(name: &str, location: u32) -> TokenStream {
+    let location = Literal::u32_unsuffixed(location);
+    quote! { ::spirv_interop::OutputVariable { name: #name, location: #location } }
+}
+
+fn variables(module: &Module) -> TokenStream {
+    let mut types = TokenStream::new();
+    let mut uniform_vars = vec![];
+    let mut input_vars = vec![];
+    let mut output_vars = vec![];
+
+    for instruction in module.types_global_values.iter() {
+        if let Op::Variable = instruction.class.opcode {
+            let pointer = inst(
+                &module.types_global_values,
+                instruction.result_type.unwrap(),
+            );
+
+            if let [Operand::StorageClass(storage), Operand::IdRef(type_ref)] =
+                pointer.operands.as_slice()
+            {
+                let variable_id = instruction.result_id.unwrap();
+                let type_name = name(module, variable_id).unwrap();
+                if !type_name.is_empty() {
+                    let type_ident: Ident = syn::parse_str(&type_name).unwrap();
+                    let rust_type = type_convert(module, *type_ref, &[]);
+                    types.extend(quote! {
+                        pub type #type_ident = #rust_type;
+                    });
+
+                    let decorations = decorations(module, variable_id);
+                    let mut set = None;
+                    let mut binding = None;
+                    let mut location = None;
+
+                    for decoration in decorations {
+                        match decoration {
+                            (Decoration::DescriptorSet, Some(Operand::LiteralInt32(val))) => {
+                                set = Some(val)
+                            }
+                            (Decoration::Binding, Some(Operand::LiteralInt32(val))) => {
+                                binding = Some(val)
+                            }
+                            (Decoration::Location, Some(Operand::LiteralInt32(val))) => {
+                                location = Some(val)
+                            }
+                            _ => (),
+                        }
+                    }
+
+                    match storage {
+                        StorageClass::Uniform => {
+                            uniform_vars.push(construct_uniform_var(
+                                type_name,
+                                set.unwrap(),
+                                binding.unwrap(),
+                            ));
+                        }
+                        StorageClass::Input => {
+                            input_vars.push(construct_input_var(type_name, location.unwrap()));
+                        }
+                        StorageClass::Output => {
+                            output_vars.push(construct_output_var(type_name, location.unwrap()));
+                        }
+                        _ => panic!("Unimplemented StorageClass {:?}", storage),
+                    }
+                }
+            }
+        }
+    }
+
+    let uniform_vars = array(
+        quote!(UNIFORM_VARIABLES),
+        quote!(::spirv_interop::UniformVariable),
+        &uniform_vars,
+    );
+
+    let input_vars = array(
+        quote!(INPUT_VARIABLES),
+        quote!(::spirv_interop::InputVariable),
+        &input_vars,
+    );
+
+    let output_vars = array(
+        quote!(OUTPUT_VARIABLES),
+        quote!(::spirv_interop::OutputVariable),
+        &output_vars,
+    );
+
+    quote! {
+        #types
+        pub const #uniform_vars;
+        pub const #input_vars;
+        pub const #output_vars;
+    }
+}
+
 #[proc_macro]
 pub fn reflect(tokens: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let Reflect {
@@ -360,20 +491,24 @@ pub fn reflect(tokens: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let shader_bytes = fs::read(shader_path).expect("Failed to read SPIR-V shader source");
     let shader_module = rspirv::dr::load_bytes(&shader_bytes).expect("Failed to parse SPIR-V");
 
-    if false {
-        panic!(
-            "\n{}",
-            rspirv::binary::Disassemble::disassemble(&shader_module)
-        );
+    if true {
+        std::fs::write("reflect_debug", format!("{:#?}", shader_module)).unwrap();
+        std::fs::write(
+            "reflect_asm",
+            rspirv::binary::Disassemble::disassemble(&shader_module),
+        )
+        .unwrap();
     }
 
     let entry_points = entry_points(&shader_module);
     let structs = structs(&shader_module);
+    let variables = variables(&shader_module);
 
     proc_macro::TokenStream::from(quote! {
         #visibility mod #name {
             #entry_points
             #structs
+            #variables
         }
     })
 }

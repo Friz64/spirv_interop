@@ -1,6 +1,7 @@
-spirv_interop::reflect!(mod uniform: "src/bin/reflect.vert.spv");
+spirv_interop::reflect!(mod reflect_test: "src/bin/reflect_test.vert.spv");
 
 fn main() {
-    dbg!(uniform::ENTRY_POINTS);
-    dbg!(uniform::Uniform {});
+    dbg!(reflect_test::ENTRY_POINTS);
+    dbg!(reflect_test::UNIFORM_VARIABLES);
+    //dbg!(reflect_test::UniformTest {});
 }
