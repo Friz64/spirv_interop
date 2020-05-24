@@ -19,7 +19,7 @@ layout(set = 0, binding = 0) uniform Test {
     float[] unsized_array;
 }
 test[3];
-//layout(binding = 1) uniform sampler2D texSampler;
+layout(set = 0, binding = 1) uniform sampler2D texSampler;
 
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec3 inColor;
@@ -30,6 +30,5 @@ layout(location = 1) out vec2 fragTexCoord;
 
 void main() {
     // ensures that the compiler does not optimize out structs
-    gl_Position = test[0].matrix1[0];
-    //gl_Position = texture(texSampler, test[0].matrix1[0].xy);
+    gl_Position = texture(texSampler, test[0].matrix1[0].xy);
 }

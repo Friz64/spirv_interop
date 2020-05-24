@@ -14,3 +14,4 @@ edition = "2018"
 [dependencies]
 spirv_interop_macros = { path = "../spirv_interop_macros" }
 mint = "0.5"
+memoffset = "0.5"

@@ -30,11 +30,10 @@ impl Parse for Reflect {
     }
 }
 
-fn array(name: TokenStream, ty: TokenStream, values: &[TokenStream]) -> TokenStream {
+// returns: (type, constructor)
+fn array(ty: &TokenStream, values: &[TokenStream]) -> (TokenStream, TokenStream) {
     let len = Literal::usize_unsuffixed(values.len());
-    quote! {
-        #name: [#ty; #len] = [#(#values),*]
-    }
+    (quote! { [#ty; #len] }, quote! { [#(#values),*] })
 }
 
 fn inst(insts: &[Instruction], id: Word) -> &Instruction {
@@ -204,6 +203,9 @@ fn type_convert(
     let type_inst = inst(&module.types_global_values, type_id);
 
     match type_inst.class.opcode {
+        Op::TypeSampledImage => {
+            quote! { ::spirv_interop::Sampler }
+        }
         Op::TypeStruct => {
             let name: Ident = syn::parse_str(&name(module, type_id).unwrap()).unwrap();
             quote! { #name }
@@ -317,9 +319,9 @@ fn entry_points(module: &Module) -> TokenStream {
         })
         .collect();
 
-    let arr = array(quote!(ENTRY_POINTS), quote!(&str), &entry_points);
+    let (arr_ty, arr_val) = array(&quote!(&str), &entry_points);
     quote! {
-        pub const #arr;
+        pub const ENTRY_POINTS: #arr_ty = #arr_val;
     }
 }
 
@@ -377,21 +379,23 @@ fn construct_uniform_var(name: &str, set: u32, binding: u32) -> TokenStream {
     quote! { ::spirv_interop::UniformVariable { name: #name, set: #set, binding: #binding } }
 }
 
-fn construct_input_var(name: &str, location: u32) -> TokenStream {
+fn construct_input_attr(name: &str, location: u32, offset: TokenStream) -> TokenStream {
     let location = Literal::u32_unsuffixed(location);
-    quote! { ::spirv_interop::InputVariable { name: #name, location: #location } }
+    quote! { ::spirv_interop::InputAttribute { name: #name, location: #location, offset: #offset } }
 }
 
-fn construct_output_var(name: &str, location: u32) -> TokenStream {
+fn construct_output_attr(name: &str, location: u32, offset: TokenStream) -> TokenStream {
     let location = Literal::u32_unsuffixed(location);
-    quote! { ::spirv_interop::OutputVariable { name: #name, location: #location } }
+    quote! { ::spirv_interop::OutputAttribute { name: #name, location: #location, offset: #offset } }
 }
 
 fn variables(module: &Module) -> TokenStream {
     let mut types = TokenStream::new();
     let mut uniform_vars = vec![];
-    let mut input_vars = vec![];
-    let mut output_vars = vec![];
+    let mut input_attrs = vec![];
+    let mut input_data = vec![];
+    let mut output_attrs = vec![];
+    let mut output_data = vec![];
 
     for instruction in module.types_global_values.iter() {
         if let Op::Variable = instruction.class.opcode {
@@ -408,9 +412,6 @@ fn variables(module: &Module) -> TokenStream {
                 if !type_name.is_empty() {
                     let type_ident: Ident = syn::parse_str(&type_name).unwrap();
                     let rust_type = type_convert(module, *type_ref, &[]);
-                    types.extend(quote! {
-                        pub type #type_ident = #rust_type;
-                    });
 
                     let decorations = decorations(module, variable_id);
                     let mut set = None;
@@ -433,7 +434,11 @@ fn variables(module: &Module) -> TokenStream {
                     }
 
                     match storage {
-                        StorageClass::Uniform => {
+                        StorageClass::Uniform | StorageClass::UniformConstant => {
+                            types.extend(quote! {
+                                pub type #type_ident = #rust_type;
+                            });
+
                             uniform_vars.push(construct_uniform_var(
                                 type_name,
                                 set.unwrap(),
@@ -441,10 +446,32 @@ fn variables(module: &Module) -> TokenStream {
                             ));
                         }
                         StorageClass::Input => {
-                            input_vars.push(construct_input_var(type_name, location.unwrap()));
+                            let location = location.unwrap();
+                            input_attrs.push(construct_input_attr(
+                                type_name,
+                                location,
+                                quote! {
+                                    ::spirv_interop::memoffset::offset_of!(
+                                        InputData,
+                                        #type_ident
+                                    )
+                                },
+                            ));
+                            input_data.push((location, type_ident, rust_type));
                         }
                         StorageClass::Output => {
-                            output_vars.push(construct_output_var(type_name, location.unwrap()));
+                            let location = location.unwrap();
+                            output_attrs.push(construct_output_attr(
+                                type_name,
+                                location,
+                                quote! {
+                                    ::spirv_interop::memoffset::offset_of!(
+                                        OutputData,
+                                        #type_ident
+                                    )
+                                },
+                            ));
+                            output_data.push((location, type_ident, rust_type));
                         }
                         _ => panic!("Unimplemented StorageClass {:?}", storage),
                     }
@@ -453,29 +480,53 @@ fn variables(module: &Module) -> TokenStream {
         }
     }
 
-    let uniform_vars = array(
-        quote!(UNIFORM_VARIABLES),
-        quote!(::spirv_interop::UniformVariable),
-        &uniform_vars,
-    );
+    input_data.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    let input_data_fields: Vec<_> = input_data
+        .into_iter()
+        .map(|(_, name, ty)| {
+            quote! { #name: #ty, }
+        })
+        .collect();
 
-    let input_vars = array(
-        quote!(INPUT_VARIABLES),
-        quote!(::spirv_interop::InputVariable),
-        &input_vars,
-    );
+    output_data.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    let output_data_fields: Vec<_> = output_data
+        .into_iter()
+        .map(|(_, name, ty)| {
+            quote! { #name: #ty, }
+        })
+        .collect();
 
-    let output_vars = array(
-        quote!(OUTPUT_VARIABLES),
-        quote!(::spirv_interop::OutputVariable),
-        &output_vars,
-    );
+    let (uniform_vars_ty, uniform_vars_val) =
+        array(&quote!(::spirv_interop::UniformVariable), &uniform_vars);
+    let (input_attrs_ty, input_attrs_val) =
+        array(&quote! { ::spirv_interop::InputAttribute }, &input_attrs);
+    let (output_attrs_ty, output_attrs_val) =
+        array(&quote! { ::spirv_interop::OutputAttribute }, &output_attrs);
 
     quote! {
         #types
-        pub const #uniform_vars;
-        pub const #input_vars;
-        pub const #output_vars;
+
+        pub const UNIFORM_VARS: #uniform_vars_ty = #uniform_vars_val;
+
+        #[repr(C)]
+        #[derive(Debug, Clone)]
+        pub struct InputData {
+            #(#input_data_fields)*
+        }
+
+        pub fn input_attrs() -> #input_attrs_ty {
+            #input_attrs_val
+        }
+
+        #[repr(C)]
+        #[derive(Debug, Clone)]
+        pub struct OutputData {
+            #(#output_data_fields)*
+        }
+
+        pub fn output_attrs() -> #output_attrs_ty {
+            #output_attrs_val
+        }
     }
 }
 
